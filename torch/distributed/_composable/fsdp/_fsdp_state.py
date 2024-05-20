@@ -49,6 +49,13 @@ def disable_if_config_true(func):
     return fsdp_hook_wrapper
 
 
+# NOTE(yf225): if this config is on, never do resize and always create new AGO tensor per AG call.
+# i.e. make AGO tensor creation totally internal to the graph and make sharded_tensor the only input to grpah.
+# This should be much easier to support by compile.
+def no_storage_resize():
+    return True
+
+
 class FSDPState(_State):
     def __init__(self):
         super().__init__()

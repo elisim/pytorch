@@ -308,7 +308,7 @@ class FSDPParam:
         world_size: int,
         device: torch.device,
     ):
-        if self.all_gather_outputs:
+        if not torch.distributed._composable.fsdp._fsdp_state.no_storage_resize() and self.all_gather_outputs:
             return  # already initialized
         self.all_gather_outputs = [
             torch.empty(torch.Size([numel * world_size]), dtype=dtype, device=device)
@@ -319,12 +319,10 @@ class FSDPParam:
         ]
 
     def init_unsharded_param(self):
-        if hasattr(self, "_unsharded_param"):  # after the 1st all-gather
+        # If no storage resize, always redo unsharded_param init
+        if not torch.distributed._composable.fsdp._fsdp_state.no_storage_resize() and hasattr(self, "_unsharded_param"):  # after the 1st all-gather
             inner_tensor = self._sharded_local_tensor
-            if (
-                torch._dynamo.compiled_autograd.compiled_autograd_enabled
-                or not hasattr(inner_tensor, "fsdp_post_all_gather")
-            ):
+            if not hasattr(inner_tensor, "fsdp_post_all_gather"):
                 return  # already initialized
             for tensor in self._unsharded_inner_tensors:
                 alloc_storage(tensor)
@@ -360,7 +358,8 @@ class FSDPParam:
         unsharded_param = torch.as_strided(
             unsharded_tensor,
             self._orig_size,
-            make_contiguous_strides_for(self._orig_size),
+            self._contiguous_orig_stride,
+            # make_contiguous_strides_for(self._orig_size),
             storage_offset=0,
         )
         if self.is_dtensor:
@@ -504,11 +503,10 @@ class FSDPParam:
         # TODO(yf225): support the len(self.all_gather_outputs) > 1 case (i.e. support custom fsdp_pre_all_gather)
         assert len(self.all_gather_outputs) == 1
         assert len(self.all_gather_output_storage_sizes) == 1
-        if not torch._dynamo.compiled_autograd.compiled_autograd_enabled:
+        if not torch.distributed._composable.fsdp._fsdp_state.no_storage_resize():
             alloc_storage(self.all_gather_outputs[0], self.all_gather_output_storage_sizes[0])
-        else:
-            free_storage(self._unsharded_param)
-            alloc_storage(self._unsharded_param, self.all_gather_output_storage_sizes[0])
+            # free_storage(self._unsharded_param)
+            # alloc_storage(self._unsharded_param, self.all_gather_output_storage_sizes[0])
 
     def free_unsharded_param(self) -> None:
         # for tensor in itertools.chain(
@@ -521,10 +519,9 @@ class FSDPParam:
         # because .all_gather_output and ._unsharded_param share the same storage.
         # We use ._unsharded_param under compile just to avoid having .all_gather_output as graph input.
         assert len(self.all_gather_outputs) == 1
-        if not torch._dynamo.compiled_autograd.compiled_autograd_enabled:
+        if not torch.distributed._composable.fsdp._fsdp_state.no_storage_resize():
             free_storage(self.all_gather_outputs[0])
-        else:
-            free_storage(self._unsharded_param)
+            # free_storage(self._unsharded_param)
 
     @property
     def all_gather_inputs(self) -> List[torch.Tensor]:  # 1D
@@ -637,11 +634,15 @@ class FSDPParam:
 
 
 def alloc_storage(tensor: torch.Tensor, new_size: int) -> None:
+    if torch.distributed._composable.fsdp._fsdp_state.no_storage_resize():
+        raise Exception("we shouldn't be calling alloc_storage when no_storage_resize is True!")
     if (storage := tensor.untyped_storage()).size() != new_size:
         storage.resize_(new_size)
 
 
 def free_storage(tensor: torch.Tensor) -> None:
+    if torch.distributed._composable.fsdp._fsdp_state.no_storage_resize():
+        raise Exception("we shouldn't be calling free_storage when no_storage_resize is True!")
     if (storage := tensor.untyped_storage()).size() != 0:
         storage.resize_(0)
 
