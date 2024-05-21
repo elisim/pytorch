@@ -2578,11 +2578,20 @@ class HalideCodeCache(CppPythonBindingsCodeCache):
         """
     )
 
+    @staticmethod
+    def _arg_order(arg):
+        # Halide reorders args
+        is_in = "in_ptr" in arg.name
+        is_out = "out_ptr" in arg.name
+        is_scalar = arg.numel is None
+        assert (is_in + is_out + is_scalar) == 1
+        return is_scalar + is_out * 2
+
     @classmethod
     def _codegen_glue(cls, argtypes, headerfile):
         buffers = []
         buffer_names = []
-        for i, arg in enumerate(argtypes):
+        for i, arg in enumerate(sorted(argtypes, key=cls._arg_order)):
             if arg.numel:
                 buffer_names.append(f"hl_buf_{i}")
                 buffers.append(

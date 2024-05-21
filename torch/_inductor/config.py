@@ -62,7 +62,7 @@ nan_asserts = os.environ.get("TORCHINDUCTOR_NAN_ASSERTS") == "1"
 pick_loop_orders = True
 
 # reuse a kernel input as the output
-inplace_buffers = True
+inplace_buffers = False  # TODO(jansel): support this with halide
 
 # reuse a buffer for an unrelated purpose
 allow_buffer_reuse = True
@@ -816,6 +816,17 @@ class cuda:
     # caused by the op ordering of the "pingpong" memory access
     # pattern used by some Cutlass Kernels.
     cutlass_op_denylist_regex: Optional[str] = "pingpong"
+
+
+# Backend to use for CPU codegen either "cpp" or "halide" (experimental)
+cpu_backend = "halide"
+
+
+class halide:
+    # add `-no_asserts` to halide `target=`
+    # TODO(jansel): halide asserts seem buggy
+    # pytest test/inductor/test_torchinductor.py -vsx -k test_aliased_buffer_reuse_cpu
+    no_asserts = True
 
 
 # create a directory containing lots of debug information
