@@ -1,3 +1,5 @@
+from typing import Dict
+
 import torch
 
 # This module is imported only if oneDNN Graph can be used
@@ -5,8 +7,7 @@ import torch._C._onednn_graph as onednn_graph  # type: ignore[import-not-found]
 from torch.profiler import record_function
 from ..ir import InductorImplicitFallback
 
-
-onednn_graph_dtype_map: dict[torch.dtype, onednn_graph.logical_tensor] = {
+onednn_graph_dtype_map: Dict[torch.dtype, onednn_graph.logical_tensor] = {
     torch.float16: onednn_graph.logical_tensor.f16,
     torch.bfloat16: onednn_graph.logical_tensor.bf16,
     torch.float32: onednn_graph.logical_tensor.f32,
@@ -16,7 +17,7 @@ onednn_graph_dtype_map: dict[torch.dtype, onednn_graph.logical_tensor] = {
     torch.bool: onednn_graph.logical_tensor.boolean,
 }
 
-onednn_graph_reverse_dtype_map: dict[onednn_graph.logical_tensor, torch.dtype] = {
+onednn_graph_reverse_dtype_map: Dict[onednn_graph.logical_tensor, torch.dtype] = {
     onednn_graph_dtype_map[key]: key for key in onednn_graph_dtype_map
 }
 
