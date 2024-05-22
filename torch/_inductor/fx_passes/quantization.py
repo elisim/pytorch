@@ -10,6 +10,7 @@ import torch
 from torch._dynamo.utils import counters
 from torch.fx.experimental.symbolic_shapes import has_free_symbols
 from torch.fx.node import map_arg
+from .. import config
 from ..lowering import lowerings as L, require_channels_last
 from ..pattern_matcher import (
     _return_true,
@@ -21,13 +22,9 @@ from ..pattern_matcher import (
     ListOf,
     Match,
 )
-from ..utils import is_onednn_graph_supported, pad_listlike
+from ..utils import is_avx512_bf16_supported, is_onednn_graph_supported, pad_listlike
 from .freezing_patterns import register_freezing_graph_pattern
 from .post_grad import register_lowering_pattern
-
-if is_onednn_graph_supported():
-    import torch._C._onednn_graph as onednn_graph  # type: ignore[import-not-found]
-    from .onednn_graph import OnednnGraphPartitionModule
 
 aten = torch.ops.aten
 prims = torch.ops.prims
@@ -76,6 +73,15 @@ def _get_pattern_output_dtype(match: Match):
     if output_dtype is torch.uint8:
         output_dtype = None
     return output_dtype
+
+
+@functools.lru_cache(None)
+def _use_onednn_graph_bf16_fusions(match: Match):
+    """
+    Whether the machine supports AVX512_BF16 ISA.
+    Some fusions would only be enabled on machines that support AVX512_BF16 ISA
+    """
+    return is_avx512_bf16_supported()
 
 
 def _may_generate_pattern_with_dtype_convert(
@@ -2769,7 +2775,7 @@ def _register_bert_large_mha_int8_pass():
 
     @register_freezing_graph_pattern(
         _generate_bert_large_uint8_inference_pattern(use_amp=True),
-        extra_check=_return_true,
+        extra_check=_use_onednn_graph_bf16_fusions,
         pass_number=0,
     )
     @register_freezing_graph_pattern(
@@ -2778,6 +2784,9 @@ def _register_bert_large_mha_int8_pass():
         pass_number=0,
     )
     def bert_large_int8(match: Match, *args, **kwargs):
+        assert (
+            is_onednn_graph_supported() and config.onednn_graph
+        ), "oneDNN Graph must be supported"
         # Is int8-bf16?
         is_int8_bf16 = False
         dtype_conversion_nodes = filter_nodes(
@@ -2813,8 +2822,24 @@ def _register_bert_large_mha_int8_pass():
             if is_int8_bf16
             else scale_scalar_tensor,
         )
+        fused_kernel = None
+        # It's possible that onednn_graph was not imported if Inductor config was modified later
+        # so we can't rely on the environment variable TORCHINDUCTOR_ONEDNN_GRAPH
+        try:
+            fused_kernel = OnednnGraphPartitionModule(
+                f"onednn_graph_{output_node.name}"  # noqa: F823
+            )
+            # While importing oneDNN here isn't necessary for functionality,
+            # mypy necessitated the following statement
+            import torch._C._onednn_graph as onednn_graph  # type: ignore[import-not-found]
+        except NameError:  # noqa: F823
+            import torch._C._onednn_graph as onednn_graph  # type: ignore[import-not-found]
+            from .onednn_graph import OnednnGraphPartitionModule
 
-        fused_kernel = OnednnGraphPartitionModule(f"onednn_graph_{output_node.name}")
+            fused_kernel = OnednnGraphPartitionModule(
+                f"onednn_graph_{output_node.name}"
+            )
+
         query_lt = fused_kernel.create_logical_tensor_from_tensor(query)
         key_lt = fused_kernel.create_logical_tensor_from_tensor(key)
         value_lt = fused_kernel.create_logical_tensor_from_tensor(value)
@@ -2907,8 +2932,8 @@ def _register_bert_large_mha_int8_pass():
         qk_matmul_op = fused_kernel.create_op(onednn_graph.op.MatMul, "qk_matmul")
         qk_matmul_op.add_inputs(
             [
-                dequantize_query_lt_bf16 if is_int8_bf16 else dequantize_query_lt_f32,
-                dequantize_key_lt_bf16 if is_int8_bf16 else dequantize_key_lt_f32,
+                dequantize_query_lt_bf16 if is_int8_bf16 else dequantize_query_lt_f32,  # type: ignore[possibly-undefined]
+                dequantize_key_lt_bf16 if is_int8_bf16 else dequantize_key_lt_f32,  # type: ignore[possibly-undefined]
             ]
         )
         qk_matmul_op.add_outputs([qk_matmul_lt])
@@ -2985,7 +3010,7 @@ def _register_bert_large_mha_int8_pass():
             onednn_graph.op.zps, [kwargs["post_softmax_q_zps"]]
         )
         post_softmax_quantize_op.add_inputs(
-            [post_softmax_typecast_lt if is_int8_bf16 else softmax_output_lt]
+            [post_softmax_typecast_lt if is_int8_bf16 else softmax_output_lt]  # type: ignore[possibly-undefined]
         )
         post_softmax_quantize_op.add_outputs([post_softmax_quantize_lt])
         fused_kernel.add_op(post_softmax_quantize_op)
@@ -3037,10 +3062,10 @@ def _register_bert_large_mha_int8_pass():
         second_matmul = fused_kernel.create_op(onednn_graph.op.MatMul, "second_matmul")
         second_matmul.add_inputs(
             [
-                post_softmax_dequantize_bf16_lt
+                post_softmax_dequantize_bf16_lt  # type: ignore[possibly-undefined]
                 if is_int8_bf16
                 else post_softmax_dequantize_lt,
-                dequantize_value_lt_bf16 if is_int8_bf16 else dequantize_value_lt_f32,
+                dequantize_value_lt_bf16 if is_int8_bf16 else dequantize_value_lt_f32,  # type: ignore[possibly-undefined]
             ]
         )
         second_matmul.add_outputs([post_attn_lt])
@@ -3100,7 +3125,7 @@ def _register_bert_large_mha_int8_pass():
         pre_output_quantize.set_attr(onednn_graph.op.zps, [kwargs["post_qkv_q_zps"]])
         pre_output_quantize.add_inputs(
             [
-                pre_final_quantize_lt
+                pre_final_quantize_lt  # type: ignore[possibly-undefined]
                 if is_int8_bf16
                 else post_attn_transpose_contiguous_lt
             ]
@@ -3123,7 +3148,7 @@ def _register_bert_large_mha_int8_pass():
                     kwargs["query"],
                     kwargs["key"],
                     kwargs["value"],
-                    attn_mask_bf16_node if is_int8_bf16 else kwargs["attn_mask"],
+                    attn_mask_bf16_node if is_int8_bf16 else kwargs["attn_mask"],  # type: ignore[possibly-undefined]
                     inv_scale_tensor_node,
                 ]
             ]
